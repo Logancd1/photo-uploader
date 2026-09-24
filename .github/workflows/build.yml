@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     strategy:
@@ -42,7 +45,7 @@ jobs:
       - name: Zip macOS app
         if: runner.os == 'macOS'
         run: ditto -c -k --keepParent dist/AmazonPhotosUploader.app AmazonPhotosUploader-macos.zip
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.file }}

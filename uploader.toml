@@ -1,0 +1,27 @@
+# Sample config for amazon_photos_upload.py
+# Usage:  python amazon_photos_upload.py --config uploader.toml
+#
+# Any flag you'd normally pass on the command line can go here instead.
+# CLI flags override these if you pass both, e.g.:
+#   python amazon_photos_upload.py --config uploader.toml --dry-run
+
+# One or more local folders to scan (recursively, including nested subfolders).
+# Windows paths in Git Bash: use forward slashes, e.g. "/c/Users/you/Pictures/2024".
+folders = [
+    "F:/google-photos-export",
+]
+
+# Set true to also upload video files (mp4, mov, avi, etc.), not just photos.
+include_videos = true
+
+# Set true to dump everything into the root of Amazon Photos instead of
+# mirroring your local folder structure there.
+flat = true
+
+# Amazon top-level domain for your account/region. "com" for the US.
+# Other examples: "ca" (Canada), "co.uk" (UK), "de" (Germany).
+tld = "com"
+
+# Where the local SQLite ledger and cache live. Defaults to ~/.amazon_photos_uploader
+# if omitted; only set this if you want it somewhere else (e.g. a synced/backed-up drive).
+# state_dir = "/c/Users/you/.amazon_photos_uploader"

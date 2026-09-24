@@ -1,4 +1,7 @@
+__pycache__/
+build/
+dist/
+*.spec
 cookies_raw.txt
 log.log
-uploader.toml
-__pycache__/*
+debug_*.png

@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: AmazonPhotosUploader-windows
+            file: dist/AmazonPhotosUploader.exe
+          - os: macos-latest
+            artifact: AmazonPhotosUploader-macos
+            file: AmazonPhotosUploader-macos.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Smoke test (imports + dedupe scan)
+        shell: bash
+        run: |
+          mkdir t && printf 'a' > t/a.jpg && printf 'a' > t/b.jpg
+          python - <<'EOF'
+          import threading
+          from photos_uploader import core
+          s = core.load_settings(); s["folders"] = ["t"]
+          r = core.upload(s, True, threading.Event(), lambda a, b: None)
+          assert r["to_upload"] == 1 and r["skipped"] == 1, r
+          EOF
+      - run: python build.py
+      - name: Zip macOS app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/AmazonPhotosUploader.app AmazonPhotosUploader-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.file }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true

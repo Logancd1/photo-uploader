@@ -17,6 +17,7 @@ args = [
     "--windowed",
     "--noconfirm",
     "--collect-all", "playwright",  # ships the Node driver Playwright needs at runtime
+    "--collect-all", "customtkinter",  # theme JSON + assets are loaded from disk at runtime
 ]
 # macOS .app bundles must be onedir; Windows is friendlier as a single exe.
 args.append("--onedir" if sys.platform == "darwin" else "--onefile")

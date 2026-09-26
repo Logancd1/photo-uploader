@@ -1,15 +1,28 @@
-"""Tkinter front end for the Amazon Photos Uploader."""
+"""CustomTkinter front end for the Amazon Photos Uploader."""
 from __future__ import annotations
 
 import logging
 import queue
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
 
 from photos_uploader import core
 
 APP_NAME = "Amazon Photos Uploader"
+
+# Palette shared with the LCD Labs site.
+BG = "#F7F6FA"
+CARD = "#FFFFFF"
+INK = "#171623"
+MUTED = "#6E6C7C"
+BORDER = "#E4E2EC"
+ACCENT = "#5B4CFF"
+ACCENT_HOVER = "#4A3CE6"
+GOOD, GOOD_BG = "#15803D", "#DCFCE7"
+BAD, BAD_BG = "#B91C1C", "#FEE2E2"
+WARN = "#B45309"
 
 
 class QueueHandler(logging.Handler):
@@ -21,15 +34,40 @@ class QueueHandler(logging.Handler):
         self.q.put(("log", record.levelno, self.format(record)))
 
 
-class App(tk.Tk):
+def card(parent, title: str) -> ctk.CTkFrame:
+    frame = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=14, border_width=1, border_color=BORDER)
+    frame.pack(fill="x", padx=20, pady=(0, 12))
+    ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=13, weight="bold"), text_color=MUTED
+                 ).pack(anchor="w", padx=16, pady=(12, 4))
+    return frame
+
+
+def primary(parent, text, command, **kw) -> ctk.CTkButton:
+    kw.setdefault("height", 36)
+    return ctk.CTkButton(parent, text=text, command=command, corner_radius=10,
+                         fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="white",
+                         font=ctk.CTkFont(size=14, weight="bold"), **kw)
+
+
+def secondary(parent, text, command, **kw) -> ctk.CTkButton:
+    kw.setdefault("height", 36)
+    return ctk.CTkButton(parent, text=text, command=command, corner_radius=10,
+                         fg_color="transparent", hover_color="#EEEDF6", text_color=INK,
+                         border_width=1, border_color=BORDER, font=ctk.CTkFont(size=13), **kw)
+
+
+class App(ctk.CTk):
     def __init__(self):
-        super().__init__()
+        ctk.set_appearance_mode("light")
+        super().__init__(fg_color=BG)
         self.title(APP_NAME)
-        self.minsize(560, 620)
+        self.geometry("620x800")
+        self.minsize(560, 720)
         self.settings = core.load_settings()
         self.q: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self.cancel = threading.Event()
+        self.row_buttons: list[ctk.CTkButton] = []
 
         handler = QueueHandler(self.q)
         handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
@@ -43,66 +81,74 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ layout
     def _build(self):
-        pad = {"padx": 12, "pady": 6}
-        root = ttk.Frame(self)
-        root.pack(fill="both", expand=True)
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=24, pady=(20, 14))
+        ctk.CTkLabel(head, text="Amazon Photos Uploader", text_color=INK,
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(head, text="Upload a folder of photos, skipping anything already uploaded.",
+                     text_color=MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w")
 
-        acct = ttk.LabelFrame(root, text="Amazon account")
-        acct.pack(fill="x", **pad)
-        self.status = ttk.Label(acct, text="")
-        self.status.grid(row=0, column=0, sticky="w", padx=8, pady=8)
-        self.btn_in = ttk.Button(acct, text="Sign in", command=self._sign_in)
-        self.btn_in.grid(row=0, column=1, padx=4)
-        self.btn_out = ttk.Button(acct, text="Sign out", command=self._sign_out)
-        self.btn_out.grid(row=0, column=2, padx=(4, 8))
-        ttk.Label(acct, text="Region:").grid(row=1, column=0, sticky="e", padx=8, pady=(0, 8))
-        self.region = tk.StringVar(value=self.settings["region"])
-        self.region_box = ttk.Combobox(acct, textvariable=self.region, values=core.REGIONS, width=10, state="readonly")
-        self.region_box.grid(row=1, column=1, sticky="w", pady=(0, 8))
-        self.region_box.bind("<<ComboboxSelected>>", lambda _e: self._region_changed())
-        acct.columnconfigure(0, weight=1)
+        # Account
+        acct = card(self, "AMAZON ACCOUNT")
+        row = ctk.CTkFrame(acct, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 6))
+        self.status = ctk.CTkLabel(row, text="", corner_radius=999, height=28, width=130,
+                                   font=ctk.CTkFont(size=13, weight="bold"))
+        self.status.pack(side="left")
+        self.btn_out = secondary(row, "Sign out", self._sign_out, width=90)
+        self.btn_out.pack(side="right")
+        self.btn_in = primary(row, "Sign in", self._sign_in, width=110)
+        self.btn_in.pack(side="right", padx=(0, 8))
 
-        fr = ttk.LabelFrame(root, text="Folders to upload (subfolders included)")
-        fr.pack(fill="x", **pad)
-        self.folders = tk.Listbox(fr, height=5, activestyle="none", selectmode="extended")
-        self.folders.pack(side="left", fill="both", expand=True, padx=(8, 4), pady=8)
-        col = ttk.Frame(fr)
-        col.pack(side="right", padx=(4, 8), pady=8, anchor="n")
-        self.btn_add = ttk.Button(col, text="Add folder…", command=self._add_folder)
-        self.btn_add.pack(fill="x")
-        self.btn_rm = ttk.Button(col, text="Remove", command=self._remove_folder)
-        self.btn_rm.pack(fill="x", pady=(4, 0))
+        reg = ctk.CTkFrame(acct, fg_color="transparent")
+        reg.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkLabel(reg, text="Amazon region", text_color=MUTED, font=ctk.CTkFont(size=13)).pack(side="left")
+        self.region = ctk.StringVar(value=self.settings["region"])
+        self.region_box = ctk.CTkOptionMenu(
+            reg, variable=self.region, values=core.REGIONS,
+            command=lambda _v: self._region_changed(), width=110, height=30, corner_radius=8,
+            fg_color=BG, button_color=BORDER, button_hover_color="#D6D3E3", text_color=INK,
+            dropdown_fg_color=CARD, dropdown_text_color=INK, dropdown_hover_color="#EEEDF6")
+        self.region_box.pack(side="left", padx=10)
 
-        opts = ttk.Frame(root)
-        opts.pack(fill="x", **pad)
-        self.videos = tk.BooleanVar(value=self.settings["include_videos"])
-        self.dry = tk.BooleanVar(value=False)
-        self.chk_v = ttk.Checkbutton(opts, text="Include videos", variable=self.videos, command=self._save)
-        self.chk_v.pack(side="left")
-        self.chk_d = ttk.Checkbutton(opts, text="Preview only (don't upload)", variable=self.dry)
-        self.chk_d.pack(side="left", padx=16)
+        # Folders
+        fol = card(self, "FOLDERS  ·  subfolders are included")
+        self.folder_list = ctk.CTkFrame(fol, fg_color=BG, corner_radius=10)
+        self.folder_list.pack(fill="x", padx=16, pady=(0, 8), ipady=2)
+        self.btn_add = secondary(fol, "+  Add folder", self._add_folder, width=130)
+        self.btn_add.pack(anchor="w", padx=16, pady=(0, 14))
 
-        run = ttk.Frame(root)
-        run.pack(fill="x", **pad)
-        self.btn_go = ttk.Button(run, text="Start upload", command=self._start)
+        # Options
+        opt = card(self, "OPTIONS")
+        self.videos = ctk.BooleanVar(value=self.settings["include_videos"])
+        self.dry = ctk.BooleanVar(value=False)
+        self.sw_v = ctk.CTkSwitch(opt, text="Include videos", variable=self.videos, command=self._save,
+                                  progress_color=ACCENT, text_color=INK)
+        self.sw_v.pack(anchor="w", padx=16, pady=(2, 6))
+        self.sw_d = ctk.CTkSwitch(opt, text="Preview only (don't upload anything)", variable=self.dry,
+                                  progress_color=ACCENT, text_color=INK)
+        self.sw_d.pack(anchor="w", padx=16, pady=(0, 14))
+
+        # Run
+        run = ctk.CTkFrame(self, fg_color="transparent")
+        run.pack(fill="x", padx=20, pady=(0, 10))
+        self.btn_go = primary(run, "Start upload", self._start, width=140, height=42)
         self.btn_go.pack(side="left")
-        self.btn_cancel = ttk.Button(run, text="Cancel", command=self._cancel, state="disabled")
+        self.btn_cancel = secondary(run, "Cancel", self._cancel, width=90, height=42, state="disabled")
         self.btn_cancel.pack(side="left", padx=8)
-        self.progress = ttk.Progressbar(run, mode="determinate")
-        self.progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.progress = ctk.CTkProgressBar(run, height=10, corner_radius=5, progress_color=ACCENT, fg_color=BORDER)
+        self.progress.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        self.progress.set(0)
 
-        lg = ttk.Frame(root)
-        lg.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.log = tk.Text(lg, height=10, state="disabled", wrap="word")
-        sb = ttk.Scrollbar(lg, command=self.log.yview)
-        self.log.configure(yscrollcommand=sb.set)
-        self.log.tag_configure("warn", foreground="#b45309")
-        self.log.tag_configure("error", foreground="#b91c1c")
-        sb.pack(side="right", fill="y")
-        self.log.pack(side="left", fill="both", expand=True)
+        # Log
+        self.log = ctk.CTkTextbox(self, fg_color=CARD, border_width=1, border_color=BORDER, corner_radius=12,
+                                  text_color=INK, font=ctk.CTkFont(family="Consolas", size=12), wrap="word")
+        self.log.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        self.log.tag_config("warn", foreground=WARN)
+        self.log.tag_config("error", foreground=BAD)
+        self.log.configure(state="disabled")
 
-        self.locked = [self.btn_in, self.btn_out, self.region_box, self.btn_add, self.btn_rm,
-                       self.chk_v, self.chk_d, self.btn_go]
+        self.locked = [self.btn_in, self.region_box, self.btn_add, self.sw_v, self.sw_d, self.btn_go]
 
     # ------------------------------------------------------------------ state
     def _save(self):
@@ -113,29 +159,44 @@ class App(tk.Tk):
     def _refresh(self):
         s = self.settings
         if s["logged_in"]:
-            self.status.config(text="● Signed in", foreground="#15803d")
+            self.status.configure(text="●  Signed in", text_color=GOOD, fg_color=GOOD_BG)
         else:
-            self.status.config(text="○ Not signed in", foreground="#b91c1c")
-        self.btn_in.config(text="Re-sign in" if s["logged_in"] else "Sign in")
-        self.btn_out.config(state="normal" if s["logged_in"] else "disabled")
-        self.folders.delete(0, "end")
-        for f in s["folders"]:
-            self.folders.insert("end", f)
+            self.status.configure(text="○  Not signed in", text_color=BAD, fg_color=BAD_BG)
+        self.btn_in.configure(text="Re-sign in" if s["logged_in"] else "Sign in")
+        self.btn_out.configure(state="normal" if s["logged_in"] else "disabled")
+
+        for w in self.folder_list.winfo_children():
+            w.destroy()
+        self.row_buttons = []
+        if not s["folders"]:
+            ctk.CTkLabel(self.folder_list, text="No folders yet - add one below.", text_color=MUTED
+                         ).pack(pady=18)
+        for i, f in enumerate(s["folders"]):
+            r = ctk.CTkFrame(self.folder_list, fg_color=CARD, corner_radius=8)
+            r.pack(fill="x", pady=2)
+            ctk.CTkLabel(r, text=f, text_color=INK, anchor="w", font=ctk.CTkFont(size=12)
+                         ).pack(side="left", fill="x", expand=True, padx=10, pady=6)
+            b = ctk.CTkButton(r, text="✕", width=28, height=26, corner_radius=6, fg_color="transparent",
+                              hover_color=BAD_BG, text_color=MUTED, command=lambda i=i: self._remove_folder(i))
+            b.pack(side="right", padx=4)
+            self.row_buttons.append(b)
 
     def _set_busy(self, busy: bool):
-        for w in self.locked:
-            w.config(state="disabled" if busy else "normal")
+        state = "disabled" if busy else "normal"
+        for w in [*self.locked, *self.row_buttons]:
+            w.configure(state=state)
         if not busy:
-            self.region_box.config(state="readonly")
-            self.btn_out.config(state="normal" if self.settings["logged_in"] else "disabled")
-        self.btn_cancel.config(state="normal" if busy else "disabled")
+            self.btn_out.configure(state="normal" if self.settings["logged_in"] else "disabled")
+        else:
+            self.btn_out.configure(state="disabled")
+        self.btn_cancel.configure(state="normal" if busy else "disabled")
 
     def _write_log(self, text: str, level: int = logging.INFO):
-        tag = "error" if level >= logging.ERROR else "warn" if level >= logging.WARNING else ""
-        self.log.config(state="normal")
+        tag = "error" if level >= logging.ERROR else "warn" if level >= logging.WARNING else None
+        self.log.configure(state="normal")
         self.log.insert("end", text + "\n", tag)
         self.log.see("end")
-        self.log.config(state="disabled")
+        self.log.configure(state="disabled")
 
     # ------------------------------------------------------------------ actions
     def _region_changed(self):
@@ -151,15 +212,15 @@ class App(tk.Tk):
             self._save()
             self._refresh()
 
-    def _remove_folder(self):
-        for i in reversed(self.folders.curselection()):
-            del self.settings["folders"][i]
+    def _remove_folder(self, i: int):
+        del self.settings["folders"][i]
         self._save()
         self._refresh()
 
     def _sign_in(self):
         self._save()
-        self._run(lambda: core.sign_in(self.settings, self.cancel), on_result="signin", indeterminate=True)
+        settings = dict(self.settings)
+        self._run(lambda: core.sign_in(settings, self.cancel), on_result="signin")
 
     def _sign_out(self):
         if messagebox.askyesno(APP_NAME, "Sign out and forget the saved Amazon session?"):
@@ -180,21 +241,20 @@ class App(tk.Tk):
         self._run(
             lambda: core.upload(settings, dry, self.cancel,
                                 lambda done, total: self.q.put(("progress", done, total))),
-            on_result="upload", indeterminate=True,
+            on_result="upload",
         )
 
     def _cancel(self):
         self.cancel.set()
         self._write_log("Cancelling after the current step (a batch already handed to Amazon finishes first)...",
                         logging.WARNING)
-        self.btn_cancel.config(state="disabled")
+        self.btn_cancel.configure(state="disabled")
 
-    def _run(self, fn, on_result: str, indeterminate: bool):
+    def _run(self, fn, on_result: str):
         self.cancel.clear()
         self._set_busy(True)
-        if indeterminate:
-            self.progress.config(mode="indeterminate")
-            self.progress.start(12)
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
 
         def target():
             try:
@@ -222,7 +282,8 @@ class App(tk.Tk):
                 elif msg[0] == "progress":
                     _, done, total = msg
                     self.progress.stop()
-                    self.progress.config(mode="determinate", maximum=max(total, 1), value=done)
+                    self.progress.configure(mode="determinate")
+                    self.progress.set(done / max(total, 1))
                 elif msg[0] == "done":
                     self._finish(*msg[1:])
         except queue.Empty:
@@ -231,7 +292,8 @@ class App(tk.Tk):
 
     def _finish(self, kind: str, result, error):
         self.progress.stop()
-        self.progress.config(mode="determinate", value=0)
+        self.progress.configure(mode="determinate")
+        self.progress.set(1 if (kind == "upload" and not error and not self.dry.get()) else 0)
         self._set_busy(False)
         if error == "cancelled":
             self._write_log("Cancelled. Anything already uploaded is remembered, so you can resume any time.")

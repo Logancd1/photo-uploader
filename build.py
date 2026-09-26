@@ -21,4 +21,4 @@ args = [
 ]
 # macOS .app bundles must be onedir; Windows is friendlier as a single exe.
 args.append("--onedir" if sys.platform == "darwin" else "--onefile")
-PyInstaller.__main__.run(args)
+PyInstaller.__main__.run(args + sys.argv[1:])  # e.g. `python build.py --distpath out` to avoid a running exe

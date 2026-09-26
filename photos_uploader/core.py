@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Callable
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
@@ -183,7 +184,38 @@ def _first_match(page: Page, selectors: list[str], timeout: int = 3000):
     raise last
 
 
-def launch(pw, settings: dict):
+_BANNER_JS = """
+(() => {
+  if (window.top !== window) return;
+  const TEXT = %s;
+  const add = () => {
+    if (!document.documentElement || document.getElementById('__apu_banner')) return;
+    const host = document.createElement('div');
+    host.id = '__apu_banner';
+    // pointer-events:none so it can never intercept a click; closed shadow root so it's invisible to page selectors.
+    host.style.cssText = 'all:initial;position:fixed;left:0;right:0;bottom:0;z-index:2147483647;pointer-events:none;';
+    const root = host.attachShadow({mode: 'closed'});
+    const bar = document.createElement('div');
+    bar.textContent = TEXT;
+    bar.style.cssText = 'background:#5B4CFF;color:#fff;font:600 15px system-ui,sans-serif;text-align:center;padding:12px 16px;box-shadow:0 -2px 12px rgba(0,0,0,.25)';
+    root.appendChild(bar);
+    document.documentElement.appendChild(host);
+  };
+  add();
+  setInterval(add, 1000);
+})();
+"""
+
+BANNER_SIGN_IN = ("Amazon Photos Uploader: sign in here and keep going until you can see your Photos library. "
+                  "This window closes by itself.")
+BANNER_UPLOAD = ("Amazon Photos Uploader is working in this window. Please don't close it, click, or type "
+                 "here until it finishes.")
+
+WINDOW_CLOSED = ("The browser window was closed before the job finished. Progress so far is saved - "
+                 "click Start upload to pick up where it left off.")
+
+
+def launch(pw, settings: dict, banner: str | None = None):
     """Launch the user's installed Chrome/Edge with our private profile. Returns (context, channel)."""
     order = list(BROWSER_CHANNELS)
     if settings.get("channel") in order:  # a profile is tied to the browser that created it
@@ -194,7 +226,12 @@ def launch(pw, settings: dict):
         try:
             ctx = pw.chromium.launch_persistent_context(
                 str(profile), channel=channel, headless=False, viewport={"width": 1280, "height": 900},
+                # Amazon is less likely to show an error page to a browser that doesn't announce automation.
+                ignore_default_args=["--enable-automation"],
+                args=["--disable-blink-features=AutomationControlled"],
             )
+            if banner:
+                ctx.add_init_script(_BANNER_JS % json.dumps(banner))
             return ctx, channel
         except Exception as e:  # not installed, or profile locked by another window
             errors.append(f"{channel}: {str(e).splitlines()[0]}")
@@ -208,11 +245,41 @@ def _page(ctx):
     return ctx.pages[0] if ctx.pages else ctx.new_page()
 
 
-def _looks_logged_in(page: Page) -> bool:
-    if "/ap/" in page.url:  # Amazon's sign-in / 2FA / captcha flows all live under /ap/
+def _in_auth_flow(url: str) -> bool:
+    """Amazon's sign-in, 2FA, claim and captcha pages live under /ap/ and /ax/."""
+    path = urlparse(url).path
+    return path.startswith(("/ap/", "/ax/"))
+
+
+def _url_path(url: str) -> str:
+    """Host + path only. Query strings can carry tokens, so they never reach logs."""
+    u = urlparse(url)
+    return u.netloc + u.path
+
+
+def _photos_page(pages):
+    """A tab that's on an Amazon Photos page of any shape: /photos, /photos/all, /photos/albums/..."""
+    for p in pages:
+        path = urlparse(p.url).path.rstrip("/")
+        if path == "/photos" or path.startswith("/photos/"):
+            return p
+    return None
+
+
+def _has_auth_cookie(ctx) -> bool:
+    """Amazon sets an `at-<site>` cookie (e.g. at-main) once you're signed in."""
+    return any(c["name"].startswith(("at-", "at_")) for c in ctx.cookies() if "amazon." in c["domain"])
+
+
+def _looks_logged_in(page: Page, timeout: int = 20000) -> bool:
+    """True once the Photos library has loaded for a signed-in user (its Add/Upload button is present)."""
+    if _in_auth_flow(page.url):
         return False
+    marker = page.locator(SELECTORS["logged_in_marker"][0])
+    for sel in SELECTORS["logged_in_marker"][1:]:
+        marker = marker.or_(page.locator(sel))
     try:
-        _first_match(page, SELECTORS["logged_in_marker"], timeout=1500)
+        marker.first.wait_for(state="attached", timeout=timeout)
         return True
     except PWTimeout:
         return False
@@ -280,24 +347,46 @@ def _upload_batch(page: Page, files: list[Path], cancel: threading.Event):
 def sign_in(settings: dict, cancel: threading.Event, timeout: float = 900) -> dict:
     """Open a browser window for the user to log in by hand. Returns updated settings."""
     with sync_playwright() as pw:
-        ctx, channel = launch(pw, settings)
+        ctx, channel = launch(pw, settings, BANNER_SIGN_IN)
         try:
             page = _page(ctx)
             page.goto(photos_url(settings["region"]), wait_until="domcontentloaded")
             log.info("Sign in to Amazon in the window that just opened. It closes on its own when you're done.")
             deadline = time.time() + timeout
+            last_try = 0.0
+            last_state = None
             while time.time() < deadline:
                 if cancel.is_set():
                     raise Cancelled()
                 try:
-                    if page.is_closed():
-                        break
-                    if _looks_logged_in(page):
+                    pages = [p for p in ctx.pages if not p.is_closed()]
+                    if not pages:
+                        break  # user closed the window
+                    cookie = _has_auth_cookie(ctx)
+                    on_photos = _photos_page(pages)
+                    mid_login = any(_in_auth_flow(p.url) for p in pages)
+                    state = (cookie, on_photos is not None, mid_login)
+                    if state != last_state:
+                        last_state = state
+                        log.debug("sign-in state: login_cookie=%s on_photos_page=%s mid_login=%s urls=%s",
+                                  cookie, state[1], mid_login, [_url_path(p.url) for p in pages])
+                    if cookie and on_photos is not None and not mid_login:
+                        # Any /photos... page (e.g. /photos/all) while holding a login cookie means we're in.
+                        log.info("Signed in.")
+                        time.sleep(3)  # let Amazon finish writing its cookies before the browser closes
                         return {**settings, "logged_in": True, "channel": channel}
-                    if "/ap/" not in page.url and "/photos" not in page.url:
-                        page.goto(photos_url(settings["region"]), wait_until="domcontentloaded")
-                except Exception:
-                    break  # window closed by the user
+                    if cookie and not mid_login and time.time() - last_try > 20:
+                        # Signed in but stranded elsewhere (e.g. amazon.com home): take them to Photos.
+                        last_try = time.time()
+                        log.info("Signed in - opening your Photos library...")
+                        try:
+                            pages[0].goto(photos_url(settings["region"]), wait_until="domcontentloaded")
+                        except Exception as e:  # a redirect can interrupt goto; the next pass re-checks
+                            log.debug("goto interrupted: %r", e)
+                except Exception as e:
+                    log.debug("sign-in poll error: %r", e)
+                    if not ctx.pages:
+                        break
                 time.sleep(2)
             raise UploadFailed("Sign-in wasn't completed. Click Sign in to try again.")
         finally:
@@ -367,7 +456,8 @@ def upload(
 
         on_progress(0, len(pending))
         with sync_playwright() as pw:
-            ctx, _ = launch(pw, settings)
+            ctx, _ = launch(pw, settings, BANNER_UPLOAD)
+            page = None
             try:
                 page = _page(ctx)
                 page.goto(photos_url(settings["region"]), wait_until="domcontentloaded")
@@ -383,6 +473,12 @@ def upload(
                         ledger.mark_uploaded(md5, p)
                     summary["uploaded"] += len(batch)
                     on_progress(summary["uploaded"], len(pending))
+            except (Cancelled, UploadFailed):
+                raise
+            except Exception as e:
+                if (page is not None and page.is_closed()) or "closed" in str(e).lower():
+                    raise UploadFailed(WINDOW_CLOSED) from e
+                raise
             finally:
                 try:
                     ctx.close()

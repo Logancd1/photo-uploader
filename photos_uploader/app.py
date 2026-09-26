@@ -11,6 +11,8 @@ import customtkinter as ctk
 from photos_uploader import core
 
 APP_NAME = "Amazon Photos Uploader"
+UPLOAD_HINT = ("A browser window is doing the uploading for you. Leave it open and visible - don't close it, "
+               "click, or type in it. Keep this computer awake until it finishes.")
 
 # Palette shared with the LCD Labs site.
 BG = "#F7F6FA"
@@ -71,8 +73,16 @@ class App(ctk.CTk):
 
         handler = QueueHandler(self.q)
         handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
+        handler.setLevel(logging.INFO)
         core.log.addHandler(handler)
-        core.log.setLevel(logging.INFO)
+        core.log.setLevel(logging.DEBUG)
+        try:  # detailed diagnostics for troubleshooting: <app data folder>/uploader.log
+            from logging.handlers import RotatingFileHandler
+            fh = RotatingFileHandler(core.app_dir() / "uploader.log", maxBytes=500_000, backupCount=1, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            core.log.addHandler(fh)
+        except OSError:
+            pass
 
         self._build()
         self._refresh()
@@ -110,6 +120,9 @@ class App(ctk.CTk):
             fg_color=BG, button_color=BORDER, button_hover_color="#D6D3E3", text_color=INK,
             dropdown_fg_color=CARD, dropdown_text_color=INK, dropdown_hover_color="#EEEDF6")
         self.region_box.pack(side="left", padx=10)
+
+        self.hint = ctk.CTkLabel(acct, text="", text_color=ACCENT, fg_color="#EEEBFF", corner_radius=8,
+                                 justify="left", anchor="w", wraplength=520, font=ctk.CTkFont(size=13))
 
         # Folders
         fol = card(self, "FOLDERS  ·  subfolders are included")
@@ -219,8 +232,18 @@ class App(ctk.CTk):
 
     def _sign_in(self):
         self._save()
+        if not messagebox.askokcancel(
+            APP_NAME,
+            "A browser window will open. To finish signing in:\n\n"
+            "1.  Sign in to your Amazon account (including any verification).\n"
+            "2.  Keep going until you can see your Photos library.\n"
+            "3.  The window closes by itself once you're there - don't close it early.",
+        ):
+            return
         settings = dict(self.settings)
-        self._run(lambda: core.sign_in(settings, self.cancel), on_result="signin")
+        self._run(lambda: core.sign_in(settings, self.cancel), on_result="signin",
+                  hint="Sign in to Amazon in the browser window, then continue until you can see your "
+                       "Photos library. The window closes by itself when you're done.")
 
     def _sign_out(self):
         if messagebox.askyesno(APP_NAME, "Sign out and forget the saved Amazon session?"):
@@ -238,10 +261,22 @@ class App(ctk.CTk):
             messagebox.showinfo(APP_NAME, "Sign in to Amazon first.")
             return
         settings, dry = dict(self.settings), self.dry.get()
+        if not dry and not messagebox.askokcancel(
+            APP_NAME,
+            "Heads up - this app uploads by driving a real browser window.\n\n"
+            "When you click OK:\n"
+            "  -  A Chrome/Edge window opens and the app clicks through Amazon Photos for you.\n"
+            "  -  Leave that window open and visible. Don't close it, click, or type in it.\n"
+            "  -  Keep your computer awake and connected until it finishes.\n\n"
+            "You can use other programs meanwhile. If the window gets closed by accident, nothing is "
+            "lost: click Start upload again and it picks up where it left off.",
+        ):
+            return
         self._run(
             lambda: core.upload(settings, dry, self.cancel,
                                 lambda done, total: self.q.put(("progress", done, total))),
             on_result="upload",
+            hint=None if dry else UPLOAD_HINT,
         )
 
     def _cancel(self):
@@ -250,9 +285,12 @@ class App(ctk.CTk):
                         logging.WARNING)
         self.btn_cancel.configure(state="disabled")
 
-    def _run(self, fn, on_result: str):
+    def _run(self, fn, on_result: str, hint: str | None = None):
         self.cancel.clear()
         self._set_busy(True)
+        if hint:
+            self.hint.configure(text="  " + hint + "  ")
+            self.hint.pack(fill="x", padx=16, pady=(0, 14), ipady=8)
         self.progress.configure(mode="indeterminate")
         self.progress.start()
 
@@ -291,6 +329,7 @@ class App(ctk.CTk):
         self.after(100, self._pump)
 
     def _finish(self, kind: str, result, error):
+        self.hint.pack_forget()
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.progress.set(1 if (kind == "upload" and not error and not self.dry.get()) else 0)
